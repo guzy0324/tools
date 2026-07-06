@@ -6,6 +6,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$callerDir = (Get-Location).ProviderPath
 $shScript = Join-Path $PSScriptRoot "devspace_serve.sh"
 
 if (-not (Test-Path -LiteralPath $shScript -PathType Leaf)) {
@@ -29,7 +30,8 @@ if (-not $shCommand) {
 $exitCode = 1
 
 try {
-    # 切换到脚本所在目录，避免 Windows 路径转换问题
+    $env:DEVSPACE_ALLOWED_ROOTS = $callerDir
+
     Push-Location -LiteralPath $PSScriptRoot
 
     & $shCommand.Source "./devspace_serve.sh" @ScriptArgs

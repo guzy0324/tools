@@ -8,6 +8,8 @@ TIMEOUT_SECONDS="${DEVSPACE_TUNNEL_TIMEOUT:-60}"
 CONFIG_DIR="${DEVSPACE_CONFIG_DIR:-${HOME}/.devspace}"
 AUTH_FILE="${CONFIG_DIR}/auth.json"
 
+DEVSPACE_NPM_PACKAGE="${DEVSPACE_NPM_PACKAGE:-@waishnav/devspace}"
+
 LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/devspace-cloudflared.XXXXXX.log")"
 
 CF_PID=""
@@ -36,6 +38,71 @@ cleanup() {
 
 trap cleanup EXIT
 
+extract_version() {
+    grep -Eo '[0-9]+(\.[0-9]+){1,3}([-+][A-Za-z0-9.-]+)?' | head -n 1 || true
+}
+
+version_gt() {
+    local latest="$1"
+    local current="$2"
+
+    node -e '
+        const latest = process.argv[1];
+        const current = process.argv[2];
+
+        function parse(v) {
+            return String(v)
+                .replace(/^v/, "")
+                .split(/[.-]/)
+                .map(x => /^[0-9]+$/.test(x) ? Number(x) : x);
+        }
+
+        const a = parse(latest);
+        const b = parse(current);
+        const len = Math.max(a.length, b.length);
+
+        for (let i = 0; i < len; i++) {
+            const x = a[i] ?? 0;
+            const y = b[i] ?? 0;
+
+            if (typeof x === "number" && typeof y === "number") {
+                if (x > y) process.exit(0);
+                if (x < y) process.exit(1);
+            } else {
+                const xs = String(x);
+                const ys = String(y);
+                if (xs > ys) process.exit(0);
+                if (xs < ys) process.exit(1);
+            }
+        }
+
+        process.exit(1);
+    ' "${latest}" "${current}"
+}
+
+ask_yes_no() {
+    local prompt="$1"
+    local default="${2:-n}"
+    local answer=""
+
+    if [[ "${default}" == "y" ]]; then
+        read -r -p "${prompt} [Y/n]: " answer || answer=""
+        answer="${answer:-y}"
+    else
+        read -r -p "${prompt} [y/N]: " answer || answer=""
+        answer="${answer:-n}"
+    fi
+
+    case "${answer}" in
+        y|Y|yes|YES|1|true|TRUE)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # 检查依赖
 for command_name in cloudflared devspace grep; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
@@ -44,6 +111,114 @@ for command_name in cloudflared devspace grep; do
         exit 1
     fi
 done
+
+# 检查 DevSpace 是否有新版本，并选择是否更新
+echo
+echo "正在检查 DevSpace 是否有新版本..."
+
+CURRENT_DEVSPACE_VERSION="$(
+    devspace --version 2>/dev/null |
+    extract_version
+)"
+
+if [[ -n "${CURRENT_DEVSPACE_VERSION}" ]]; then
+    echo "当前 DevSpace 版本：${CURRENT_DEVSPACE_VERSION}"
+else
+    echo "[警告] 无法解析当前 DevSpace 版本。"
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+    echo "[警告] 找不到 npm，无法检查或更新 DevSpace。"
+elif ! command -v node >/dev/null 2>&1; then
+    echo "[警告] 找不到 node，无法比较 DevSpace 版本。"
+else
+    set +e
+    LATEST_DEVSPACE_VERSION="$(
+        npm view "${DEVSPACE_NPM_PACKAGE}" version 2>/dev/null |
+        extract_version
+    )"
+    NPM_VIEW_EXIT_CODE=$?
+    set -e
+
+    if [[ "${NPM_VIEW_EXIT_CODE}" -ne 0 || -z "${LATEST_DEVSPACE_VERSION}" ]]; then
+        echo "[警告] 无法从 npm 检查 DevSpace 最新版本。"
+        echo "包名：${DEVSPACE_NPM_PACKAGE}"
+
+        DEVSPACE_UPDATE_CHOICE="${DEVSPACE_UPDATE:-}"
+
+        if [[ -z "${DEVSPACE_UPDATE_CHOICE}" ]]; then
+            echo
+            if ask_yes_no "是否仍然强制更新 DevSpace？" "n"; then
+                DEVSPACE_UPDATE_CHOICE="y"
+            else
+                DEVSPACE_UPDATE_CHOICE="n"
+            fi
+        fi
+
+        case "${DEVSPACE_UPDATE_CHOICE:-n}" in
+            y|Y|yes|YES|1|true|TRUE)
+                echo
+                echo "正在强制更新 DevSpace..."
+                npm install -g "${DEVSPACE_NPM_PACKAGE}@latest"
+                echo "DevSpace 更新完成。"
+                ;;
+            *)
+                echo "已选择：不更新 DevSpace。"
+                ;;
+        esac
+    else
+        echo "最新 DevSpace 版本：${LATEST_DEVSPACE_VERSION}"
+
+        SHOULD_UPDATE="unknown"
+
+        if [[ -n "${CURRENT_DEVSPACE_VERSION}" ]]; then
+            if version_gt "${LATEST_DEVSPACE_VERSION}" "${CURRENT_DEVSPACE_VERSION}"; then
+                SHOULD_UPDATE="yes"
+            else
+                SHOULD_UPDATE="no"
+            fi
+        fi
+
+        if [[ "${SHOULD_UPDATE}" == "no" ]]; then
+            echo "DevSpace 已经是最新版本，跳过更新。"
+        else
+            if [[ "${SHOULD_UPDATE}" == "yes" ]]; then
+                echo
+                echo "发现新版本：${CURRENT_DEVSPACE_VERSION} -> ${LATEST_DEVSPACE_VERSION}"
+            else
+                echo
+                echo "无法确认当前版本是否低于最新版本。"
+            fi
+
+            DEVSPACE_UPDATE_CHOICE="${DEVSPACE_UPDATE:-}"
+
+            if [[ -z "${DEVSPACE_UPDATE_CHOICE}" ]]; then
+                echo
+                if ask_yes_no "是否更新 DevSpace？" "n"; then
+                    DEVSPACE_UPDATE_CHOICE="y"
+                else
+                    DEVSPACE_UPDATE_CHOICE="n"
+                fi
+            fi
+
+            case "${DEVSPACE_UPDATE_CHOICE:-n}" in
+                y|Y|yes|YES|1|true|TRUE)
+                    echo
+                    echo "正在更新 DevSpace..."
+                    npm install -g "${DEVSPACE_NPM_PACKAGE}@latest"
+                    echo "DevSpace 更新完成。"
+
+                    echo
+                    echo "更新后的 DevSpace 版本："
+                    devspace --version || true
+                    ;;
+                *)
+                    echo "已选择：不更新 DevSpace。"
+                    ;;
+            esac
+        fi
+    fi
+fi
 
 # 检查 auth.json
 if [[ ! -f "${AUTH_FILE}" ]]; then
@@ -126,11 +301,18 @@ MCP_URL="${PUBLIC_URL}/mcp"
 
 # DevSpace 使用不带 /mcp 的公网基地址
 export DEVSPACE_PUBLIC_BASE_URL="${PUBLIC_URL}"
+export DEVSPACE_WIDGETS="off"
+
+# DevSpace 只允许访问当前目录
+if [[ -z "${DEVSPACE_ALLOWED_ROOTS:-}" ]]; then
+    export DEVSPACE_ALLOWED_ROOTS="$(pwd -P)"
+fi
 
 echo
 echo "============================================================"
 echo "Cloudflare 公网地址：${PUBLIC_URL}"
 echo "ChatGPT MCP 地址：  ${MCP_URL}"
+echo "DevSpace 允许根目录：${DEVSPACE_ALLOWED_ROOTS}"
 echo "============================================================"
 echo
 
