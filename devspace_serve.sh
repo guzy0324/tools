@@ -104,7 +104,7 @@ ask_yes_no() {
 }
 
 # 检查依赖
-for command_name in cloudflared devspace grep; do
+for command_name in cloudflared devspace grep node; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         echo "[错误] 找不到命令：${command_name}" >&2
         echo "请确认它已安装并加入 PATH。" >&2
@@ -299,14 +299,44 @@ fi
 
 MCP_URL="${PUBLIC_URL}/mcp"
 
-# DevSpace 使用不带 /mcp 的公网基地址
-export DEVSPACE_PUBLIC_BASE_URL="${PUBLIC_URL}"
-export DEVSPACE_WIDGETS="off"
-
-# DevSpace 只允许访问当前目录
+# 此变量仅用于启动器接收 PowerShell 调用目录；新版 DevSpace 不再读取它。
 if [[ -z "${DEVSPACE_ALLOWED_ROOTS:-}" ]]; then
     export DEVSPACE_ALLOWED_ROOTS="$(pwd -P)"
 fi
+
+# Git Bash 的 /c/... 路径需转换为 Windows Node 可识别的路径。
+CONFIG_PATH="${CONFIG_DIR}/config.jsonc"
+PROJECT_ROOT="${DEVSPACE_ALLOWED_ROOTS}"
+if command -v cygpath >/dev/null 2>&1; then
+    CONFIG_PATH="$(cygpath -w "${CONFIG_PATH}")"
+    PROJECT_ROOT="$(cygpath -w "${PROJECT_ROOT}")"
+fi
+
+# config 输出经过 DevSpace 解析、校验的 JSON，避免自行解析 JSONC。
+# 保留其他设置（包括 subagents），首次改写前备份原文件。
+DEVSPACE_CONFIG_JSON="$(devspace config)"
+printf '%s' "${DEVSPACE_CONFIG_JSON}" | node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const [file, publicUrl, root, portText] = process.argv.slice(1);
+    const config = JSON.parse(fs.readFileSync(0, "utf8"));
+    const port = Number(portText);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error("Invalid DEVSPACE_PORT");
+    }
+    config.server = { ...config.server, publicBaseUrl: publicUrl, port };
+    config.workspaces = { ...config.workspaces, allowedRoots: [root] };
+    config.ui = { ...config.ui, enabled: false };
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const backup = file + ".before-launcher.bak";
+    if (fs.existsSync(file) && !fs.existsSync(backup)) fs.copyFileSync(file, backup);
+    const temporary = file + ".launcher-" + process.pid + ".tmp";
+    fs.writeFileSync(temporary, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(temporary, file);
+' "${CONFIG_PATH}" "${PUBLIC_URL}" "${PROJECT_ROOT}" "${PORT}"
+unset DEVSPACE_CONFIG_JSON
+
+echo "已更新 DevSpace 配置：${CONFIG_PATH}"
 
 echo
 echo "============================================================"
