@@ -1,1 +1,3 @@
 *.exe
+*.sqlite3
+__pycache__
