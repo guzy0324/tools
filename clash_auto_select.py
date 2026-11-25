@@ -4,10 +4,6 @@ import argparse
 import hashlib
 import sqlite3
 import sys
-try:
-    import yaml
-except ImportError:
-    raise SystemExit('缺少 PyYAML，请运行 python -m pip install PyYAML')
 import json
 import os
 from pathlib import Path
@@ -23,6 +19,9 @@ from contextlib import closing
 from datetime import datetime
 from threading import Event, Thread
 import webbrowser
+
+
+TRAY_ICON = Path(__file__).resolve().parent / 'assets' / 'clash-dashboard.png'
 
 
 def log(message):
@@ -95,6 +94,10 @@ def discover_config():
 
 
 def read_yaml(path):
+    try:
+        import yaml
+    except ImportError:
+        raise RuntimeError('缺少 PyYAML，请运行 python -m pip install PyYAML') from None
     try:
         with path.open(encoding='utf-8-sig') as f:
             data = yaml.safe_load(f)
@@ -455,14 +458,11 @@ def create_app(args):
 def run_with_tray(app, port, measure):
     from werkzeug.serving import make_server
     import pystray
-    from PIL import Image, ImageDraw
+    from PIL import Image
 
     url = f'http://127.0.0.1:{port}/'
-    image = Image.new('RGBA', (64, 64))
-    draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((2, 2, 61, 61), radius=14, fill='#171f2e')
-    for left, top in ((14, 37), (27, 28), (40, 17)):
-        draw.rounded_rectangle((left, top, left + 9, 49), radius=3, fill='#80e4c1')
+    with Image.open(TRAY_ICON) as asset:
+        image = asset.convert('RGBA')
 
     icon = pystray.Icon(
         'clash_dashboard', image, 'Clash 节点测速',
@@ -486,6 +486,41 @@ def run_with_tray(app, port, measure):
             worker.join()
 
 
+def run_ubuntu_tray(port):
+    import fcntl
+    import gi
+
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('AyatanaAppIndicator3', '0.1')
+    from gi.repository import AyatanaAppIndicator3, Gtk
+
+    url = f'http://127.0.0.1:{port}/'
+    lock_path = Path(os.environ['XDG_RUNTIME_DIR']) / 'clash-dashboard-tray.lock'
+    with lock_path.open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+
+        indicator = AyatanaAppIndicator3.Indicator.new_with_path(
+            'clash-dashboard-tray', TRAY_ICON.stem,
+            AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
+            str(TRAY_ICON.parent),
+        )
+        indicator.set_title('Clash 节点测速')
+        menu = Gtk.Menu()
+        open_item = Gtk.MenuItem(label='打开看板')
+        open_item.connect('activate', lambda _: Gtk.show_uri_on_window(None, url, 0))
+        exit_item = Gtk.MenuItem(label='退出托盘')
+        exit_item.connect('activate', lambda _: Gtk.main_quit())
+        menu.append(open_item)
+        menu.append(exit_item)
+        menu.show_all()
+        indicator.set_menu(menu)
+        indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
+        Gtk.main()
+
+
 def main():
     global ARGS, SECRET, OPENER
     parser = argparse.ArgumentParser(description=__doc__)
@@ -505,13 +540,24 @@ def main():
     parser.add_argument('--retention', type=int, default=7, help='history retention in days')
     parser.add_argument('--workers', type=int, default=12, help='concurrent probe limit')
     parser.add_argument('--once', action='store_true', help='run only one round')
-    parser.add_argument('--dashboard', action='store_true', help='启动 Flask 看板')
+    interface = parser.add_mutually_exclusive_group()
+    interface.add_argument('--dashboard', action='store_true', help='启动 Flask 看板')
+    interface.add_argument('--tray', action='store_true', help='启动 Ubuntu 桌面托盘')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--dry-run', action='store_true', help='测速并预览切换')
     mode.add_argument('--auto-select', action='store_true', help='随看板启动自动切换')
     parser.add_argument('--port', type=int, default=5050, help='看板端口')
     parser.add_argument('--no-tray', action='store_true', help='只启动网页服务')
     ARGS = parser.parse_args()
+    if ARGS.tray:
+        if ARGS.once or ARGS.dry_run or ARGS.auto_select or ARGS.no_tray:
+            parser.error('--tray 用于单独启动 Ubuntu 桌面托盘')
+        if not sys.platform.startswith('linux') or not os.environ.get('XDG_RUNTIME_DIR'):
+            parser.error('--tray 需要 Ubuntu 图形桌面会话')
+        try:
+            return run_ubuntu_tray(ARGS.port)
+        except (ImportError, ValueError):
+            parser.error('托盘需要系统 Python 及 Ubuntu 的 GTK 和 Ayatana AppIndicator 绑定')
     if ARGS.dashboard and ARGS.once:
         parser.error('--once 用于单轮前台测试')
     if ARGS.auto_select and not ARGS.dashboard:
