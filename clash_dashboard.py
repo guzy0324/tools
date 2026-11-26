@@ -307,7 +307,7 @@ def subscription_uid():
         return None
 
 
-def round_once(db, stop, uid):
+def round_once(db, stop, uid, *, select=True):
     group_path = '/proxies/' + quote(ARGS.group, safe='')
     group, identities = snapshot()
     fingerprints = {name: identity[0] for name, identity in identities.items()}
@@ -340,6 +340,8 @@ def round_once(db, stop, uid):
         raise RuntimeError('测速期间节点配置或实例发生变化；丢弃本轮数据')
     now = time.time()
     save_samples(db, delays_by_fp, now)
+    if not select:
+        return
     delays = {name: delays_by_fp[fp] for name, fp in fingerprints.items()}
     history = read_history(db, fingerprints, now)
     current = latest.get('now')
@@ -375,24 +377,55 @@ def controller_secret(config):
     return secret
 
 
-def run_selection(stop):
+class Measurement:
+    def __init__(self, stop):
+        self.stop = stop
+        self.lock = Lock()
+        self.message = ''
+
+    def start(self):
+        if self.stop.is_set() or not self.lock.acquire(blocking=False):
+            return
+        try:
+            Thread(target=self.run_manual, daemon=True).start()
+        except RuntimeError:
+            self.message = '无法启动手动测速。'
+            self.lock.release()
+
+    def run_manual(self):
+        try:
+            with closing(open_database(ARGS.state)) as db:
+                round_once(db, self.stop, subscription_uid(), select=False)
+            self.message = '手动测速完成。'
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, sqlite3.Error) as exc:
+            log(f'手动测速失败: {exc}')
+            self.message = '手动测速失败，请查看运行日志。'
+        finally:
+            self.lock.release()
+
+
+def run_selection(stop, lock=None):
     try:
         db = open_database(ARGS.state)
     except (OSError, sqlite3.Error) as exc:
         log(str(exc))
         return 1
     with closing(db):
-        return selection_loop(db, stop)
+        return selection_loop(db, stop, lock or Lock())
 
 
-def selection_loop(db, stop):
+def selection_loop(db, stop, lock):
     log(f'运行配置: {ARGS.config} | 历史数据库: {ARGS.state}')
     log(f'启动: {ARGS.group} | {ARGS.url} | 每 {ARGS.interval}s | 历史 {ARGS.window}min')
     while not stop.is_set():
         start = time.monotonic()
-        uid = subscription_uid()
+        uid = None
         try:
-            round_once(db, stop, uid)
+            with lock:
+                if stop.is_set():
+                    return 0
+                uid = subscription_uid()
+                round_once(db, stop, uid)
         except HTTPError as exc:
             log(f'API HTTP {exc.code}: {exc.reason}；跳过本轮')
             if exc.code in (401, 403):
@@ -515,7 +548,7 @@ def subscription_ip():
     return min(candidates, key=lambda ip: (not ip.is_global, ip != preferred, ip), default=None)
 
 
-def create_app(args):
+def create_app(args, measurement):
     from flask import Flask, Response, abort, make_response, redirect, render_template, request, url_for
 
     app = Flask(__name__)
@@ -747,6 +780,12 @@ def create_app(args):
             form_token=form_token,
         )
 
+    @app.post('/measure')
+    def measure_now():
+        check_form_token()
+        measurement.start()
+        return redirect(url_for('dashboard'), code=303)
+
     @app.get('/')
     def dashboard():
         rows = []
@@ -805,12 +844,14 @@ def create_app(args):
             'selection', rows=rows, args=args, config_error=config_error,
             db_error=db_error, latest=datetime.fromtimestamp(latest) if latest is not None else None,
             successful=sum(row['delay'] > 0 for row in rows),
+            form_token=form_token, measuring=measurement.lock.locked(),
+            measurement_message=measurement.message,
         )
 
     return app
 
 
-def run_with_tray(app, port, measure, tray):
+def run_with_tray(app, port, measuring, measurement, tray):
     from werkzeug.serving import make_server
 
     url = f'http://127.0.0.1:{port}/'
@@ -818,18 +859,17 @@ def run_with_tray(app, port, measure, tray):
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            if measure:
-                Thread(target=run_selection, args=(measure,), daemon=True).start()
+            if measuring:
+                Thread(target=run_selection, args=(measurement.stop, measurement.lock), daemon=True).start()
             print(f'Clash Dashboard 已启动 · {url}', flush=True)
-            tray(url)
+            tray(url, measurement.start)
         finally:
-            if measure:
-                measure.set()
+            measurement.stop.set()
             server.shutdown()
             worker.join()
 
 
-def run_windows_tray(url):
+def run_windows_tray(url, measure_now):
     import pystray
     from PIL import Image
 
@@ -840,6 +880,7 @@ def run_windows_tray(url):
         'clash_dashboard', image, 'Clash Dashboard',
         pystray.Menu(
             pystray.MenuItem('打开看板', lambda icon, item: webbrowser.open(url), default=True),
+            pystray.MenuItem('立即测速', lambda icon, item: measure_now()),
             pystray.MenuItem('退出看板', lambda icon, item: icon.stop()),
         ),
     )
@@ -857,7 +898,7 @@ def ubuntu_tray_bindings():
     return AyatanaAppIndicator3, Gtk
 
 
-def run_ubuntu_tray(url):
+def run_ubuntu_tray(url, measure_now):
     AyatanaAppIndicator3, Gtk = ubuntu_tray_bindings()
     indicator = AyatanaAppIndicator3.Indicator.new_with_path(
         'clash-dashboard-tray', TRAY_ICON.stem,
@@ -868,9 +909,12 @@ def run_ubuntu_tray(url):
     menu = Gtk.Menu()
     open_item = Gtk.MenuItem(label='打开看板')
     open_item.connect('activate', lambda _: Gtk.show_uri_on_window(None, url, 0))
+    measure_item = Gtk.MenuItem(label='立即测速')
+    measure_item.connect('activate', lambda _: measure_now())
     exit_item = Gtk.MenuItem(label='退出看板')
     exit_item.connect('activate', lambda _: Gtk.main_quit())
     menu.append(open_item)
+    menu.append(measure_item)
     menu.append(exit_item)
     menu.show_all()
     indicator.set_menu(menu)
@@ -1006,8 +1050,7 @@ def main():
             install_autostart(ARGS)
             return 0
         install_verge_script(ARGS.config, ARGS.group, ARGS.url)
-        if measuring:
-            SECRET = controller_secret(ARGS.config)
+        SECRET = controller_secret(ARGS.config)
     except (RuntimeError, OSError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         log(str(exc))
         return 1
@@ -1016,17 +1059,17 @@ def main():
         return run_selection(Event())
 
     stop = Event()
-    measure = stop if measuring else None
+    measurement = Measurement(stop)
     try:
-        app = create_app(ARGS)
+        app = create_app(ARGS, measurement)
         if not ARGS.no_tray and sys.platform == 'win32':
-            run_with_tray(app, ARGS.port, measure, run_windows_tray)
+            run_with_tray(app, ARGS.port, measuring, measurement, run_windows_tray)
         elif (not ARGS.no_tray and sys.platform.startswith('linux')
               and (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'))):
-            run_with_tray(app, ARGS.port, measure, run_ubuntu_tray)
+            run_with_tray(app, ARGS.port, measuring, measurement, run_ubuntu_tray)
         else:
-            if measure:
-                Thread(target=run_selection, args=(measure,), daemon=True).start()
+            if measuring:
+                Thread(target=run_selection, args=(stop, measurement.lock), daemon=True).start()
             app.run(host='0.0.0.0', port=ARGS.port)
     except ImportError as exc:
         parser.error(f'看板依赖未安装，请运行 python -m pip install Flask pystray Pillow（{exc.name}）')

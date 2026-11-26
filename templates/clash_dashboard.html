@@ -100,8 +100,13 @@
         <h2 id="selection-title">{{ '仅测速' if args.dry_run else ('自动切换' if args.auto_select or not args.dashboard else '查看测速记录') }}</h2>
         <p>{{ args.url }} · {{ args.timeout }} ms 超时 · 评分窗口 {{ args.window }} 分钟</p>
       </div>
-      <p>最近一轮 {{ latest.strftime('%Y-%m-%d %H:%M:%S') if latest else '暂无记录' }} · 每 15 秒刷新</p>
+      <form action="{{ url_for('measure_now') }}" method="post">
+        <input type="hidden" name="form_token" value="{{ form_token }}">
+        <button class="copy-link" type="submit"{% if measuring %} disabled{% endif %}>{{ '测速中…' if measuring else '立即测速' }}</button>
+      </form>
     </header>
+  <p>最近一轮 {{ latest.strftime('%Y-%m-%d %H:%M:%S') if latest else '暂无记录' }}</p>
+  {% if measurement_message and not measuring %}<p role="status">{{ measurement_message }}</p>{% endif %}
   {% if config_error %}<p>{{ config_error }}</p>{% endif %}
   {% if db_error %}<p>{{ db_error }}</p>{% endif %}
   {% if rows %}
@@ -130,7 +135,7 @@
     </table>
   </div>
   {% elif not db_error %}
-  <p>当前测速参数暂无记录。运行测速脚本后，结果会显示在这里。</p>
+  <p>当前测速参数暂无记录。测速完成后，结果会显示在这里。</p>
   {% endif %}
   </section>
   {% endif %}
@@ -172,7 +177,7 @@
 </script>
 {% else %}
 <script>
-  setInterval(() => location.reload(), 15000);
+  setTimeout(() => location.reload(), {{ 2000 if measuring else 15000 }});
 </script>
 {% endif %}
 </body>
