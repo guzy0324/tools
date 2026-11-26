@@ -3,15 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="15">
-  <title>Clash 节点测速</title>
+  <meta name="referrer" content="no-referrer">
+  <title>Clash Dashboard</title>
   <style>
     :root { color-scheme: dark; font: 15px/1.55 "Microsoft YaHei", system-ui, sans-serif; color: #e9f0fc; background: #101621; }
     body { margin: 0; }
     main { max-width: 1180px; margin: auto; padding: clamp(16px, 5vw, 64px); }
+    main.forwarding { max-width: 1360px; }
     header { display: flex; align-items: end; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; }
     h1 { font-size: clamp(26px, 5vw, 40px); margin: 0; letter-spacing: -.04em; }
+    h2 { margin: 0; font-size: 20px; }
     p { color: #a9b8cd; margin: 8px 0; }
+    .navigation { display: flex; gap: 8px; border-bottom: 1px solid #2b364b; margin: 18px 0 22px; }
+    .navigation a { padding: 8px 14px; color: #a9b8cd; text-decoration: none; border-bottom: 2px solid transparent; }
+    .navigation a:hover, .navigation a[aria-current="page"] { color: #e9f0fc; }
+    .navigation a[aria-current="page"] { border-bottom-color: #80e4c1; }
     .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 12px; margin: 24px 0; }
     .metric, .table { background: #171f2e; border: 1px solid #2b364b; border-radius: 14px; }
     .metric { padding: 14px 18px; color: #a9b8cd; }
@@ -25,17 +31,77 @@
     tbody tr:hover { background: #202c40; }
     .pass { color: #80e4c1; }
     .fail { color: #ffa6a3; }
+    .subscription { margin: 20px 0; }
+    .subscription h2 { margin: 0 0 8px; font-size: 18px; }
+    .subscription form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+    .subscription-options { display: flex; flex-wrap: wrap; gap: 4px 14px; width: 100%; border: 0; padding: 0; margin: 0; }
+    .subscription [hidden] { display: none; }
+    .subscription-link { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 8px; margin-top: 12px; }
+    .subscription-link input { min-width: 0; width: 100%; box-sizing: border-box; }
+    .subscription-link [role="status"] { grid-column: 1 / -1; }
+    .subscription-link [role="status"]:empty { display: none; }
+    .copy-link { white-space: nowrap; cursor: pointer; color: #101621; background: #80e4c1; border: 1px solid #80e4c1; border-radius: 6px; }
+    .subscription form.subscription-alias { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px 8px; }
+    .subscription-alias label { grid-column: 1 / -1; }
+    .copy-link:disabled { opacity: .5; cursor: default; }
+    button, select, .subscription-alias input, .subscription-link input { font: inherit; padding: 4px 8px; }
+    .subscription-link input { font-family: monospace; }
+    .subscription-entry + .subscription-entry { border-top: 1px solid #2b364b; margin-top: 14px; padding-top: 2px; }
   </style>
 </head>
 <body>
-<main>
-  <header>
-    <div>
-      <h1>Clash 节点测速</h1>
-      <p>{{ args.url }} · {{ args.timeout }} ms 超时 · 最近一轮往前 {{ args.window }} 分钟</p>
+<main{% if view == 'forwarding' %} class="forwarding"{% endif %}>
+  <h1>Clash Dashboard</h1>
+  <nav class="navigation" aria-label="看板功能">
+    <a href="{{ url_for('dashboard') }}" {% if view == 'selection' %}aria-current="page"{% endif %}>自动选择</a>
+    <a href="{{ url_for('forwarding') }}" {% if view == 'forwarding' %}aria-current="page"{% endif %}>订阅转发</a>
+  </nav>
+  {% if view == 'forwarding' %}
+  <section class="metric subscription" aria-labelledby="subscription-title">
+    <h2 id="subscription-title">订阅转发</h2>
+    {% if subscription_error %}<p class="fail" role="alert">{{ subscription_error }}</p>{% endif %}
+    <form action="{{ url_for('save_subscription') }}" method="post" id="subscription-form">
+      <input type="hidden" name="form_token" value="{{ form_token }}">
+      <label><input type="checkbox" name="enabled" value="1" aria-controls="subscription-options subscription-links" {% if subscription_settings.enabled %}checked{% endif %}> 启用转发</label>
+      <fieldset class="subscription-options" id="subscription-options" {% if not subscription_settings.enabled %}hidden{% endif %}>
+        <legend>要转发的订阅</legend>
+        {% for uid, name in options.items() %}
+        <input type="hidden" name="displayed_uid" value="{{ uid }}">
+        <label><input type="checkbox" name="selected_uid" value="{{ uid }}" {% if uid in subscription_settings.get('selected', []) %}checked{% endif %}> {{ name }}</label>
+        {% endfor %}
+        {% if not options %}<p>当前 Clash 配置目录没有远程订阅。</p>{% endif %}
+      </fieldset>
+      <noscript><button type="submit">应用</button></noscript>
+    </form>
+    <div id="subscription-links" {% if not subscription_settings.enabled %}hidden{% endif %}>
+      {% for uid, name, url, alias, alias_url in subscription_links %}
+      <div class="subscription-entry">
+      <div class="subscription-link">
+        <input id="subscription-url-{{ loop.index }}" aria-label="{{ alias or name }}的订阅链接" readonly value="{{ url }}">
+        <button class="copy-link" type="button" aria-label="复制{{ alias or name }}的订阅链接">复制链接</button>
+        <span role="status"></span>
+      </div>
+      <form class="subscription-link subscription-alias" action="{{ url_for('update_subscription_link', uid=uid) }}" method="post">
+        <input type="hidden" name="form_token" value="{{ form_token }}">
+        <label for="alias-url-{{ loop.index }}">别名链接</label>
+        <input id="alias-url-{{ loop.index }}" name="alias" value="{{ alias_url or alias }}" maxlength="2048" placeholder="{{ url.split('/subscription/')[0] }}/subscription/my-config.yaml" spellcheck="false">
+        <button type="submit">更新</button>
+        <button class="copy-link" type="button" {% if not alias_url %}disabled{% endif %}>复制别名链接</button>
+        <span role="status"></span>
+      </form>
+      </div>
+      {% endfor %}
     </div>
-    <p>最近一轮 {{ latest.strftime('%Y-%m-%d %H:%M:%S') if latest else '暂无记录' }} · 每 15 秒刷新</p>
-  </header>
+  </section>
+  {% else %}
+  <section aria-labelledby="selection-title">
+    <header>
+      <div>
+        <h2 id="selection-title">{{ '仅测速' if args.dry_run else ('自动切换' if args.auto_select or not args.dashboard else '查看测速记录') }}</h2>
+        <p>{{ args.url }} · {{ args.timeout }} ms 超时 · 评分窗口 {{ args.window }} 分钟</p>
+      </div>
+      <p>最近一轮 {{ latest.strftime('%Y-%m-%d %H:%M:%S') if latest else '暂无记录' }} · 每 15 秒刷新</p>
+    </header>
   {% if config_error %}<p>{{ config_error }}</p>{% endif %}
   {% if db_error %}<p>{{ db_error }}</p>{% endif %}
   {% if rows %}
@@ -66,6 +132,48 @@
   {% elif not db_error %}
   <p>当前测速参数暂无记录。运行测速脚本后，结果会显示在这里。</p>
   {% endif %}
+  </section>
+  {% endif %}
 </main>
+{% if view == 'forwarding' %}
+<script>
+  const form = document.getElementById('subscription-form');
+  const enabled = form.elements.namedItem('enabled');
+  form.addEventListener('change', () => {
+    document.getElementById('subscription-options').hidden = !enabled.checked;
+    document.getElementById('subscription-links').hidden = !enabled.checked;
+    form.requestSubmit();
+  });
+  document.querySelectorAll('.copy-link').forEach(button => button.addEventListener('click', async () => {
+    const row = button.closest('.subscription-link');
+    const field = row.querySelector('input:not([type="hidden"])');
+    const status = row.querySelector('[role="status"]');
+    try {
+      await navigator.clipboard.writeText(field.value);
+      status.textContent = '已复制';
+    } catch {
+      field.focus();
+      field.select();
+      let copied = false;
+      try {
+        copied = document.execCommand('copy');
+      } catch {}
+      status.textContent = copied ? '已复制' : '已选中链接，请手动复制';
+    }
+  }));
+  document.querySelectorAll('.subscription-alias').forEach(row => {
+    const field = row.elements.namedItem('alias');
+    const button = row.querySelector('.copy-link');
+    const saved = button.disabled ? null : field.value;
+    field.addEventListener('input', () => {
+      button.disabled = field.value !== saved;
+    });
+  });
+</script>
+{% else %}
+<script>
+  setInterval(() => location.reload(), 15000);
+</script>
+{% endif %}
 </body>
 </html>

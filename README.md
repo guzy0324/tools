@@ -1,5 +1,27 @@
 # tools
 
+## Clash Dashboard 自启动
+
+使用平时运行看板的 Python 环境安装。脚本会尝试自动定位 Clash Verge 的运行配置，找到多份配置时可用 `--config` 指定。
+
+```sh
+python clash_dashboard.py --install
+```
+
+安装默认启用看板和自动切换，也可以用 `--install --dry-run` 仅测速。重复安装会更新启动参数。
+
+- Windows 在任务计划程序中注册 `Clash Dashboard`，当前用户登录 30 秒后后台启动，保留托盘。
+- Ubuntu 使用普通用户安装。脚本会写入 `~/.config/autostart/clash-dashboard.desktop`（如果设置了 `XDG_CONFIG_HOME`，则使用该目录）。注销再登录桌面后，托盘、看板和自动选节点在同一个进程中启动。托盘里的「退出看板」会同时关闭三者。
+- Ubuntu 托盘要求当前 Python 能导入 GTK 3 和 Ayatana AppIndicator。系统依赖可用 `sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1` 安装。GNOME 桌面需启用 AppIndicator 扩展；只需要网页看板和自动选节点时可用 `--install --no-tray`。
+
+看板默认在 `http://127.0.0.1:5050/`。直接运行 `python clash_dashboard.py` 也会同时启动看板和自动选节点。在「转发订阅」勾选「启用转发」后会显示远程订阅和复制链接。远程订阅默认全不选，勾选后才会显示对应链接。每次勾选或取消都会自动保存，重启后自动恢复。
+
+可以在每条转发链接下填写并复制完整的别名 URL。自定义 URL 使用看板服务器的 IP 和端口，路径以 `/subscription/` 开头。能访问该服务器且知道完整地址的客户端可以下载订阅。
+
+订阅转发使用 `psutil` 枚举本机网卡，可用 `python -m pip install psutil` 安装。复制的链接优先使用服务器网卡的公网 IPv4，其次使用局域网 IPv4。客户端需要能访问该地址和看板端口。
+
+如果看板运行在 SSH lab 上，在 Windows 运行 `ssh -N -L 127.0.0.1:15050:127.0.0.1:5050 lab`，再打开 `http://127.0.0.1:15050/` 管理转发。复制的订阅链接会使用 lab 的 IP。
+
 ## 后台运行 DevSpace（Windows PowerShell）
 
 安装命令入口（首次或移动脚本位置后执行）：
